@@ -141,7 +141,7 @@ $ pg_bulkload -U app1 -d db1 test0010_3.ctl
 ** gdb:
 
 Program terminated with signal 11, Segmentation fault.
-#0  _xx_buildadd (wstate=0x7ffc986a6b90, state=0x235c3d8, itup=0x7f9c2e3fd710)
+#0  _bt_buildadd (wstate=0x7ffc986a6b90, state=0x235c3d8, itup=0x7f9c2e3fd710)
     at nbtree/nbtsort-9.6.c:472
 472             itupsz = MAXALIGN(itupsz);
 

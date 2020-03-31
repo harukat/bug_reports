@@ -1,0 +1,170 @@
+diff -rc pg_bulkload-3.1.16/include/pg_btree.h pg_bulkload-3.1.16.fix/include/pg_btree.h
+*** pg_bulkload-3.1.16/include/pg_btree.h	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/include/pg_btree.h	2020-03-31 10:06:23.211546568 +0900
+***************
+*** 38,44 ****
+  						ON_DUPLICATE on_duplicate,
+  						int64 max_dup_errors,
+  						const char *dup_badfile);
+! extern void SpoolerClose(Spooler *self);
+  extern void SpoolerInsert(Spooler *self, HeapTuple tuple);
+  
+  #endif   /* BTREE_H */
+--- 38,44 ----
+  						ON_DUPLICATE on_duplicate,
+  						int64 max_dup_errors,
+  						const char *dup_badfile);
+! extern void SpoolerClose(Spooler *self, bool always_reindex);
+  extern void SpoolerInsert(Spooler *self, HeapTuple tuple);
+  
+  #endif   /* BTREE_H */
+diff -rc pg_bulkload-3.1.16/include/writer.h pg_bulkload-3.1.16.fix/include/writer.h
+*** pg_bulkload-3.1.16/include/writer.h	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/include/writer.h	2020-03-31 10:03:17.432796809 +0900
+***************
+*** 62,67 ****
+--- 62,68 ----
+  	char		   *dup_badfile;	/* duplicate error file name */
+  	char		   *logfile;		/* log file name */
+  	bool			multi_process;	/* multi process load? */
++ 	bool			always_reindex;	/* always reindex? */
+  
+  	char		   *output;			/**< output file or relation name */
+  	Oid				relid;			/**< target relation id */
+diff -rc pg_bulkload-3.1.16/lib/pg_btree.c pg_bulkload-3.1.16.fix/lib/pg_btree.c
+*** pg_bulkload-3.1.16/lib/pg_btree.c	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/lib/pg_btree.c	2020-03-31 10:05:59.200742270 +0900
+***************
+*** 90,96 ****
+  } BTReader;
+  
+  static BTSpool **IndexSpoolBegin(ResultRelInfo *relinfo, bool enforceUnique);
+! static void IndexSpoolEnd(Spooler *self);
+  static void IndexSpoolInsert(BTSpool **spools, TupleTableSlot *slot, ItemPointer tupleid, EState *estate);
+  
+  static IndexTuple BTSpoolGetNextItem(BTSpool *spool, IndexTuple itup, bool *should_free);
+--- 90,96 ----
+  } BTReader;
+  
+  static BTSpool **IndexSpoolBegin(ResultRelInfo *relinfo, bool enforceUnique);
+! static void IndexSpoolEnd(Spooler *self, bool always_reindex);
+  static void IndexSpoolInsert(BTSpool **spools, TupleTableSlot *slot, ItemPointer tupleid, EState *estate);
+  
+  static IndexTuple BTSpoolGetNextItem(BTSpool *spool, IndexTuple itup, bool *should_free);
+***************
+*** 154,164 ****
+  }
+  
+  void
+! SpoolerClose(Spooler *self)
+  {
+  	/* Merge indexes */
+  	if (self->spools != NULL)
+! 		IndexSpoolEnd(self);
+  
+  	/* Terminate spooler. */
+  	ExecDropSingleTupleTableSlot(self->slot);
+--- 154,164 ----
+  }
+  
+  void
+! SpoolerClose(Spooler *self, bool always_reindex)
+  {
+  	/* Merge indexes */
+  	if (self->spools != NULL)
+! 		IndexSpoolEnd(self, always_reindex);
+  
+  	/* Terminate spooler. */
+  	ExecDropSingleTupleTableSlot(self->slot);
+***************
+*** 236,242 ****
+   * IndexSpoolEnd - Flush and delete spools or reindex if not a btree index.
+   */
+  void
+! IndexSpoolEnd(Spooler *self)
+  {
+  	BTSpool **spools = self->spools;
+  	int				i;
+--- 236,242 ----
+   * IndexSpoolEnd - Flush and delete spools or reindex if not a btree index.
+   */
+  void
+! IndexSpoolEnd(Spooler *self, bool always_reindex)
+  {
+  	BTSpool **spools = self->spools;
+  	int				i;
+***************
+*** 250,256 ****
+  
+  	for (i = 0; i < self->relinfo->ri_NumIndices; i++)
+  	{
+! 		if (spools[i] != NULL)
+  		{
+  			_bt_mergebuild(self, spools[i]);
+  			_bt_spooldestroy(spools[i]);
+--- 250,256 ----
+  
+  	for (i = 0; i < self->relinfo->ri_NumIndices; i++)
+  	{
+! 		if (spools[i] != NULL && (!always_reindex))
+  		{
+  			_bt_mergebuild(self, spools[i]);
+  			_bt_spooldestroy(spools[i]);
+pg_bulkload-3.1.16.fix/libだけに発見: pg_btree.c.ORG
+pg_bulkload-3.1.16.fix/libだけに発見: pg_btree.c.PATCHED
+diff -rc pg_bulkload-3.1.16/lib/writer.c pg_bulkload-3.1.16.fix/lib/writer.c
+*** pg_bulkload-3.1.16/lib/writer.c	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/lib/writer.c	2020-03-31 10:03:42.511548258 +0900
+***************
+*** 82,87 ****
+--- 82,91 ----
+  	{
+  		self->verbose = ParseBoolean(value);
+  	}
++ 	else if (CompareKeyword(keyword, "ALWAYS_REINDEX"))
++ 	{
++ 		self->always_reindex = ParseBoolean(value);
++ 	}
+  	else if (!self->param(self, keyword, value))
+  		return false;
+  
+diff -rc pg_bulkload-3.1.16/lib/writer_buffered.c pg_bulkload-3.1.16.fix/lib/writer_buffered.c
+*** pg_bulkload-3.1.16/lib/writer_buffered.c	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/lib/writer_buffered.c	2020-03-31 10:07:37.152863791 +0900
+***************
+*** 112,118 ****
+  		if (self->bistate)
+  			FreeBulkInsertState(self->bistate);
+  
+! 		SpoolerClose(&self->spooler);
+  		ret.num_dup_new = self->spooler.dup_new;
+  		ret.num_dup_old = self->spooler.dup_old;
+  
+--- 112,118 ----
+  		if (self->bistate)
+  			FreeBulkInsertState(self->bistate);
+  
+! 		SpoolerClose(&self->spooler, (self->base).always_reindex);
+  		ret.num_dup_new = self->spooler.dup_new;
+  		ret.num_dup_old = self->spooler.dup_old;
+  
+diff -rc pg_bulkload-3.1.16/lib/writer_direct.c pg_bulkload-3.1.16.fix/lib/writer_direct.c
+*** pg_bulkload-3.1.16/lib/writer_direct.c	2020-02-28 09:32:45.000000000 +0900
+--- pg_bulkload-3.1.16.fix/lib/writer_direct.c	2020-03-31 10:02:38.488735386 +0900
+***************
+*** 324,330 ****
+  
+  	if (!onError)
+  	{
+! 		SpoolerClose(&self->spooler);
+  		ret.num_dup_new = self->spooler.dup_new;
+  		ret.num_dup_old = self->spooler.dup_old;
+  
+--- 324,330 ----
+  
+  	if (!onError)
+  	{
+! 		SpoolerClose(&self->spooler, (self->base).always_reindex);
+  		ret.num_dup_new = self->spooler.dup_new;
+  		ret.num_dup_old = self->spooler.dup_old;
+  

@@ -1,0 +1,204 @@
+
+
+** platform
+
+CentOS 6.x (x86_64)
+
+** PostgreSQL 9.6.16:
+
+$ ./configure --enable-debug --enable-cassert
+$ make install-world
+ 
+** pg_bulkload 3.1.16:
+
+$ make install
+
+** dbserver
+
+$ initdb --no-locale -E utf8
+
+** postgresql.conf
+
+logging_collector = on
+log_error_verbosity = verbose
+log_line_prefix = '%t %p '
+restart_after_crash = off
+post_auth_delay = 10
+
+
+** DDL:
+
+CREATE DATABASE db1;
+\c db1 postgres 
+
+CREATE SCHEMA app1;
+SET search_path = app1;
+
+CREATE UNLOGGED TABLE test0010 (
+    xx_pb_pc_no character varying(20) NOT NULL,
+    xx_sr_apl_name character varying(384) NOT NULL,
+    xx_aa_0 character varying(14),
+    xx_aa_1 character varying(2),
+    xx_aa_2 character varying(256),
+    xx_aa_3 character varying(10),
+    xx_aa_4 character varying(16),
+    xx_aa_5 character varying(256),
+    xx_aa_6 character varying(64)
+);
+
+CREATE INDEX idx001001 ON test0010 USING btree (xx_pb_pc_no, xx_sr_apl_name);
+CREATE USER app1 SUPERUSER;
+ALTER DATABASE db1 SET search_path TO 'app1';
+CREATE EXTENSION pg_bulkload ;
+
+
+** create data:
+
+psql -U app1 -d db1
+
+TRUNCATE test0010;
+INSERT INTO test0010 SELECT substr(md5(g::text), 1, 20), md5(g::text), substr(md5(g::text), 1, 14), substr(g::text, 1, 2), md5(g::text), substr(md5(g::text), 10, 10), substr(md5(g::text), 15, 16), md5(g::text), md5(g::text) FROM generate_series(100001, 200000) as g;
+\COPY test0010 TO test0010_2.csv CSV
+
+TRUNCATE test0010;
+INSERT INTO test0010 SELECT substr(md5(g::text), 1, 20), md5(g::text), substr(md5(g::text), 1, 14), substr(g::text, 1, 2), md5(g::text), substr(md5(g::text), 10, 10), substr(md5(g::text), 15, 16), md5(g::text), md5(g::text) FROM generate_series(200001, 800000) as g;
+\COPY test0010 TO test0010_3.csv CSV
+
+
+** ctl file:
+
+$ cat test0010_2.ctl
+TYPE = CSV
+INPUT = test0010_2.csv
+LOGFILE = test0010_2.log
+LIMIT = INFINITE
+PARSE_ERRORS = 0
+CHECK_CONSTRAINTS = NO
+SKIP = 0
+DELIMITER = ,
+QUOTE = "\""
+ESCAPE = "\""
+OUTPUT = app1.test0010
+MULTI_PROCESS = NO
+VERBOSE = NO
+WRITER = DIRECT
+DUPLICATE_BADFILE = test0010_2.bad
+DUPLICATE_ERRORS = 0
+ON_DUPLICATE_KEEP = NEW
+TRUNCATE = NO
+
+$ cat test0010_3.ctl
+TYPE = CSV
+INPUT = test0010_3.csv
+LOGFILE = test0010_3.log
+LIMIT = INFINITE
+PARSE_ERRORS = 0
+CHECK_CONSTRAINTS = NO
+SKIP = 0
+DELIMITER = ,
+QUOTE = "\""
+ESCAPE = "\""
+OUTPUT = app1.test0010
+MULTI_PROCESS = NO
+VERBOSE = NO
+WRITER = DIRECT
+DUPLICATE_BADFILE = test0010_3.bad
+DUPLICATE_ERRORS = 0
+ON_DUPLICATE_KEEP = NEW
+TRUNCATE = NO
+
+
+** reproduce steps:
+
+$  psql -d db1 -c 'TRUNCATE app1.test0010'
+$  pg_bulkload -U app1 -d db1 test0010_2.ctl
+$  pg_bulkload -U app1 -d db1 test0010_3.ctl
+   (((crash)))
+$  pg_bulkload -r -D $PGDATA
+$  pg_ctl start
+
+
+** avoiding crash steps:
+
+$ psql -d db1 -c 'TRUNCATE app1.test0010'
+$ pg_bulkload -U app1 -d db1 test0010_2.ctl
+$ psql -d db1 -U postgres -c "ALTER USER app1 SET maintenance_work_mem TO '256MB'"
+$ pg_bulkload -U app1 -d db1 test0010_3.ctl
+$ psql -d db1 -U postgres -c "ALTER USER app1 SET maintenance_work_mem TO DEFAULT"
+
+
+** avoiding crash steps2:
+
+ ((using pg_bulkload-3.1.16.always_reindex.patch))
+
+$ psql -d db1 -c 'TRUNCATE app1.test0010'
+$ pg_bulkload -U app1 -d db1 test0010_2.ctl
+$ echo "ALWAYS_REINDEX = YES" >> test0010_3.ctl
+$ pg_bulkload -U app1 -d db1 test0010_3.ctl
+
+
+
+** gdb:
+
+Program terminated with signal 11, Segmentation fault.
+#0  _xx_buildadd (wstate=0x7ffc986a6b90, state=0x235c3d8, itup=0x7f9c2e3fd710)
+    at nbtree/nbtsort-9.6.c:472
+472             itupsz = MAXALIGN(itupsz);
+
+(gdb) bt
+#0  _bt_buildadd (wstate=0x7ffda2147d00, state=0x1cffda8, itup=0x7f895d5f9710)
+    at nbtree/nbtsort-9.6.c:472
+#1  0x00007f895ec22fb2 in _bt_mergeload (self=0x1cfe5d8, btspool=0x1cff2e8)
+    at pg_btree.c:625
+#2  _bt_mergebuild (self=0x1cfe5d8, btspool=0x1cff2e8) at pg_btree.c:452
+#3  0x00007f895ec2355b in IndexSpoolEnd (self=0x1cfe5d8) at pg_btree.c:255
+#4  SpoolerClose (self=0x1cfe5d8) at pg_btree.c:161
+#5  0x00007f895ec2ae01 in DirectWriterClose (self=0x1cfe548,
+    onError=<value optimized out>) at writer_direct.c:327
+#6  0x00007f895ec288e3 in WriterClose (self=0x1cfe548, onError=0 '\000')
+    at writer.c:121
+#7  0x00007f895ec23e86 in pg_bulkload (fcinfo=0x7ffda2148510)
+    at pg_bulkload.c:304
+#8  0x00000000005f4c16 in ExecMakeTableFunctionResult (funcexpr=0x1cf4e20,
+    econtext=0x1cf4620, argContext=<value optimized out>,
+    expectedDesc=0x1cf5e50, randomAccess=0 '\000') at execQual.c:2211
+#9  0x000000000060b862 in FunctionNext (node=0x1cf4508)
+    at nodeFunctionscan.c:95
+#10 0x00000000005f594a in ExecScanFetch (node=0x1cf4508,
+    accessMtd=0x60b5b0 <FunctionNext>, recheckMtd=0x60ae40 <FunctionRecheck>)
+    at execScan.c:95
+#11 ExecScan (node=0x1cf4508, accessMtd=0x60b5b0 <FunctionNext>,
+    recheckMtd=0x60ae40 <FunctionRecheck>) at execScan.c:145
+#12 0x00000000005edf10 in ExecProcNode (node=0x1cf4508) at execProcnode.c:449
+#13 0x00000000005eb98a in ExecutePlan (queryDesc=0x1cf1fb0,
+    direction=<value optimized out>, count=0) at execMain.c:1567
+#14 standard_ExecutorRun (queryDesc=0x1cf1fb0,
+    direction=<value optimized out>, count=0) at execMain.c:339
+#15 0x00000000007159e7 in PortalRunSelect (portal=0x1c57330,
+    forward=<value optimized out>, count=0, dest=<value optimized out>)
+    at pquery.c:948
+#16 0x0000000000716d50 in PortalRun (portal=0x1c57330,
+    count=9223372036854775807, isTopLevel=1 '\001', dest=0x1cb9b98,
+    altdest=0x1cb9b98, completionTag=0x7ffda2148dd0 "") at pquery.c:789
+#17 0x0000000000714d82 in exec_execute_message (argc=<value optimized out>,
+    argv=<value optimized out>, dbname=0x1c64ce8 "db1",
+    username=<value optimized out>) at postgres.c:1992
+#18 PostgresMain (argc=<value optimized out>, argv=<value optimized out>,
+    dbname=0x1c64ce8 "db1", username=<value optimized out>) at postgres.c:4164
+#19 0x00000000006a9e2c in BackendRun (argc=<value optimized out>,
+    argv=<value optimized out>) at postmaster.c:4345
+#20 BackendStartup (argc=<value optimized out>, argv=<value optimized out>)
+    at postmaster.c:4019
+#21 ServerLoop (argc=<value optimized out>, argv=<value optimized out>)
+    at postmaster.c:1722
+#22 PostmasterMain (argc=<value optimized out>, argv=<value optimized out>)
+    at postmaster.c:1330
+#23 0x0000000000629bf8 in main (argc=1, argv=0x1c37cb0) at main.c:228
+
+(gdb) p itupsz
+Cannot access memory at address 0x7f9c2e3fd716
+(gdb) p itup
+$1 = (IndexTupleData *) 0x7f9c2e3fd710
+(gdb) p *itup
+Cannot access memory at address 0x7f9c2e3fd710
+

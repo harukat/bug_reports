@@ -4,7 +4,7 @@ pg_bulkload 3.1.16 bug report contents
 
 Files for https://github.com/ossc-db/pg_bulkload/issues/84
 
-See also https://github.com/harukat/pg_bulkload/commits/avoid_merging
+See also https://github.com/harukat/pg_bulkload/commits/avoid_merging_crash
 
 #### reproduce_steps.txt
 
